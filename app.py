@@ -131,14 +131,22 @@ if not edited_df.equals(display_df[column_order]):
     st.session_state.df = edited_df
     st.rerun()
 
-# --- SENSITIVITY TABLE SECTION ---
+# --- SENSITIVITY TABLE SECTION (DOWNWARD SHIFTS) ---
 st.divider()
-st.subheader("📊 Yield Sensitivity Analysis (Based on Projected Coupons)")
-st.write("This table shows the **Yield on Clean Price** if SOFR shifts from your current input.")
+st.subheader("📉 Yield Sensitivity: Rate Cut Scenarios (-0.25% to -1.50%)")
+st.write("This table shows the **Yield on Clean Price** if SOFR drops from your current input.")
 
-# Define the shifts requested
-shifts = [-0.0075, -0.0050, -0.0025, 0.0, 0.0100, 0.0125, 0.0150]
-shift_labels = ["SOFR -75bps", "SOFR -50bps", "SOFR -25bps", "Current SOFR", "SOFR +100bps", "SOFR +125bps", "SOFR +150bps"]
+# Define the negative shifts only
+shifts = [0.0, -0.0025, -0.0050, -0.0075, -0.0100, -0.0125, -0.0150]
+shift_labels = [
+    "Current SOFR", 
+    "SOFR -0.25%", 
+    "SOFR -0.50%", 
+    "SOFR -0.75%", 
+    "SOFR -1.00%", 
+    "SOFR -1.25%", 
+    "SOFR -1.50%"
+]
 
 sensitivity_data = []
 
@@ -146,18 +154,17 @@ for i, row in st.session_state.df.iterrows():
     ticker = row['Ticker']
     m = META[ticker]
     
-    # We use the Clean Price calculated in the main table to keep it consistent
-    # We must pull it from display_df to ensure we have the calculated float
+    # Extract the Clean Price from the display calculation
     clean_p = display_df.loc[display_df['Ticker'] == ticker, 'Clean Price'].values[0]
     
     ticker_yields = {"Ticker": ticker}
     
     for shift, label in zip(shifts, shift_labels):
         scenario_sofr = sofr_dec + shift
-        # Scenario Coupon = Scenario SOFR + Margin + ISDA Spread
+        # Formula: Scenario SOFR + Margin + ISDA Spread
         scenario_coupon = scenario_sofr + m['margin'] + ISDA_SPREAD
         
-        # Scenario Yield = (Par * Coupon) / Clean Price
+        # Yield: (Par * Scenario Coupon) / Clean Price
         if clean_p > 0:
             s_yield = (25.0 * scenario_coupon) / clean_p
             ticker_yields[label] = f"{s_yield*100:.3f}%"
@@ -168,12 +175,9 @@ for i, row in st.session_state.df.iterrows():
 
 sens_df = pd.DataFrame(sensitivity_data)
 
-# Display the Sensitivity Table
+# Render the table
 st.dataframe(
     sens_df,
     use_container_width=True,
-    hide_index=True,
-    column_config={
-        "Current SOFR": st.column_config.TextColumn("Current SOFR", help="Matches Yield on Clean from the top table")
-    }
+    hide_index=True
 )
