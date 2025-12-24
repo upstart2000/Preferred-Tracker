@@ -22,16 +22,23 @@ with col_input:
     sofr_val = st.number_input("3M Term SOFR (%)", value=3.6946, format="%.4f")
     sofr_dec = sofr_val / 100
 with col_btn:
-    st.write(" ") # Padding
+    st.write(" ") # Vertical alignment
     refresh = st.button("Refresh", use_container_width=True)
 
 # 3. Data Fetching
-@st.cache_data(ttl=60) # Short cache for live prices
+@st.cache_data(ttl=300) # 5 minute cache
 def fetch_live_data():
     data = []
     for ticker in TICKERS:
         t = yf.Ticker(ticker)
-        price = t.fast_info.get('last_price', 25.00)
+        
+        # RELIABLE PRICE PULL: Get the most recent closing price
+        hist = t.history(period="1d")
+        if not hist.empty:
+            price = hist['Close'].iloc[-1]
+        else:
+            price = 25.00 # Absolute fallback if API fails
+            
         divs = t.dividends
         last_ex = divs.index[-1].to_pydatetime().date() if not divs.empty else date(2025, 10, 31)
         
@@ -39,19 +46,17 @@ def fetch_live_data():
             "Ticker": ticker,
             "Margin": f"{META[ticker]['margin']*100:.3f}%",
             "Last Ex-Date": last_ex,
-            "Market Price": round(price, 2),
+            "Market Price": round(float(price), 2),
             "Accrued Interest": 0.0,
             "Clean Price": 0.0,
             "Yield on Clean": "",
-            "Next Ex-Date": "TBD",
-            "Next Payout": "",
             "Current Coupon": "",
             "Projected Coupon": "",
             "Prev Coupon": f"${META[ticker]['prev_coupon']:.4f}"
         })
     return pd.DataFrame(data)
 
-# 4. Calculation Engine
+# 4. Calculation Engine (Actual/360)
 def calculate_metrics(df, sofr):
     calc_df = df.copy()
     for i, row in calc_df.iterrows():
@@ -59,21 +64,19 @@ def calculate_metrics(df, sofr):
         m = META[ticker]
         price = float(row['Market Price'])
         
-        # Determine Coupon for Accrual (Current) vs Projection (Future)
-        # Current uses Declared rate if exists, otherwise SOFR+Margin+Spread
+        # Current Accrual Rate Logic
         current_rate = m['declared'] if m['declared'] else (sofr + m['margin'] + ISDA_SPREAD)
+        # Future Reset Rate Logic
         projected_rate = sofr + m['margin'] + ISDA_SPREAD
         
-        # Days Elapsed (Actual/360)
+        # Day Count: Actual/360
         last_ex = row['Last Ex-Date']
         last_ex_dt = datetime.combine(last_ex, datetime.min.time())
         days_elapsed = (datetime.now() - last_ex_dt).days
         
-        # Accrued: $25 * Current Rate * (Days / 360)
+        # Math
         accrued = (25.0 * current_rate) * (days_elapsed / 360)
         clean_price = price - accrued
-        
-        # Yield: (Current Annual Dividend) / Clean Price
         annual_payout = 25.0 * current_rate
         yoc = annual_payout / clean_price if clean_price > 0 else 0
         
@@ -82,7 +85,6 @@ def calculate_metrics(df, sofr):
         calc_df.at[i, 'Accrued Interest'] = round(accrued, 4)
         calc_df.at[i, 'Clean Price'] = round(clean_price, 3)
         calc_df.at[i, 'Yield on Clean'] = f"{yoc*100:.3f}%"
-        calc_df.at[i, 'Next Payout'] = f"${(annual_payout / 4):.4f}"
         
     return calc_df
 
@@ -97,8 +99,12 @@ if 'df' not in st.session_state:
 # 5. Render
 display_df = calculate_metrics(st.session_state.df, sofr_dec)
 
+# Set column order to match your requested layout
+column_order = ["Ticker", "Margin", "Last Ex-Date", "Market Price", "Accrued Interest", 
+                "Clean Price", "Yield on Clean", "Current Coupon", "Projected Coupon", "Prev Coupon"]
+
 edited_df = st.data_editor(
-    display_df,
+    display_df[column_order],
     column_config={
         "Ticker": st.column_config.TextColumn("Ticker", disabled=True),
         "Last Ex-Date": st.column_config.DateColumn("Last Ex-Date", format="YYYY-MM-DD", required=True),
@@ -109,6 +115,9 @@ edited_df = st.data_editor(
     use_container_width=True, hide_index=True, key="main_editor"
 )
 
-if not edited_df.equals(display_df):
-    st.session_state.df = edited_df
+if not edited_df.equals(display_df[column_order]):
+    # Sync edits back (keeping all columns)
+    updated_full_df = edited_df.copy()
+    # If other hidden columns existed, merge them back here
+    st.session_state.df = updated_full_df
     st.rerun()
