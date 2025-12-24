@@ -1,9 +1,9 @@
 import streamlit as st
 import yfinance as yf
 import pandas as pd
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 
-# 1. Setup & Metadata
+# 1. Setup & Fixed Metadata
 TICKERS = ["MFA-PC", "RITM-PA", "RITM-PB"]
 ISDA_SPREAD = 0.002616
 
@@ -16,31 +16,32 @@ META = {
 st.set_page_config(layout="wide", page_title="Preferred Stock Tracker")
 
 # 2. Header UI
-st.title("🚢 Preferred Stock Tracker")
+st.title("🚢 Preferred Stock Floating Rate Tracker")
 col_input, col_btn, col_spacer = st.columns([2, 1, 4])
 with col_input:
     sofr_val = st.number_input("3M Term SOFR (%)", value=3.6946, format="%.4f")
     sofr_dec = sofr_val / 100
 with col_btn:
-    st.write(" ") # Vertical alignment
-    refresh = st.button("Refresh", use_container_width=True)
+    st.write(" ") # Alignment
+    refresh = st.button("Refresh Live Prices", use_container_width=True)
 
 # 3. Data Fetching
-@st.cache_data(ttl=300) # 5 minute cache
+@st.cache_data(ttl=300)
 def fetch_live_data():
     data = []
     for ticker in TICKERS:
         t = yf.Ticker(ticker)
-        
-        # RELIABLE PRICE PULL: Get the most recent closing price
+        # Reliable Price Pull
         hist = t.history(period="1d")
-        if not hist.empty:
-            price = hist['Close'].iloc[-1]
-        else:
-            price = 25.00 # Absolute fallback if API fails
-            
+        price = hist['Close'].iloc[-1] if not hist.empty else 25.00
+        
         divs = t.dividends
-        last_ex = divs.index[-1].to_pydatetime().date() if not divs.empty else date(2025, 10, 31)
+        if not divs.empty:
+            last_ex = divs.index[-1].to_pydatetime().date()
+            next_ex = (divs.index[-1] + timedelta(days=91)).date() # Estimated 3-month cycle
+        else:
+            last_ex = date(2025, 10, 31)
+            next_ex = date(2026, 1, 30)
         
         data.append({
             "Ticker": ticker,
@@ -50,6 +51,8 @@ def fetch_live_data():
             "Accrued Interest": 0.0,
             "Clean Price": 0.0,
             "Yield on Clean": "",
+            "Next Ex-Date": next_ex,
+            "Next Payout": "",
             "Current Coupon": "",
             "Projected Coupon": "",
             "Prev Coupon": f"${META[ticker]['prev_coupon']:.4f}"
@@ -64,17 +67,16 @@ def calculate_metrics(df, sofr):
         m = META[ticker]
         price = float(row['Market Price'])
         
-        # Current Accrual Rate Logic
+        # Rate Logic
         current_rate = m['declared'] if m['declared'] else (sofr + m['margin'] + ISDA_SPREAD)
-        # Future Reset Rate Logic
         projected_rate = sofr + m['margin'] + ISDA_SPREAD
         
-        # Day Count: Actual/360
+        # Days Elapsed
         last_ex = row['Last Ex-Date']
         last_ex_dt = datetime.combine(last_ex, datetime.min.time())
         days_elapsed = (datetime.now() - last_ex_dt).days
         
-        # Math
+        # Financial Math
         accrued = (25.0 * current_rate) * (days_elapsed / 360)
         clean_price = price - accrued
         annual_payout = 25.0 * current_rate
@@ -85,6 +87,7 @@ def calculate_metrics(df, sofr):
         calc_df.at[i, 'Accrued Interest'] = round(accrued, 4)
         calc_df.at[i, 'Clean Price'] = round(clean_price, 3)
         calc_df.at[i, 'Yield on Clean'] = f"{yoc*100:.3f}%"
+        calc_df.at[i, 'Next Payout'] = f"${(annual_payout / 4):.4f}"
         
     return calc_df
 
@@ -96,28 +99,34 @@ if refresh:
 if 'df' not in st.session_state:
     st.session_state.df = fetch_live_data()
 
-# 5. Render
+# 5. Render Final Table
 display_df = calculate_metrics(st.session_state.df, sofr_dec)
 
-# Set column order to match your requested layout
-column_order = ["Ticker", "Margin", "Last Ex-Date", "Market Price", "Accrued Interest", 
-                "Clean Price", "Yield on Clean", "Current Coupon", "Projected Coupon", "Prev Coupon"]
+# Full 12-Column Specification
+column_order = [
+    "Ticker", "Margin", "Last Ex-Date", "Market Price", "Accrued Interest", 
+    "Clean Price", "Yield on Clean", "Next Ex-Date", "Next Payout", 
+    "Current Coupon", "Projected Coupon", "Prev Coupon"
+]
 
 edited_df = st.data_editor(
     display_df[column_order],
     column_config={
         "Ticker": st.column_config.TextColumn("Ticker", disabled=True),
-        "Last Ex-Date": st.column_config.DateColumn("Last Ex-Date", format="YYYY-MM-DD", required=True),
+        "Last Ex-Date": st.column_config.DateColumn("Last Ex-Date", format="YYYY-MM-DD"),
+        "Next Ex-Date": st.column_config.DateColumn("Next Ex-Date", format="YYYY-MM-DD"),
         "Market Price": st.column_config.NumberColumn("Market Price", format="$%.2f"),
         "Accrued Interest": st.column_config.NumberColumn("Accrued Interest", format="%.4f", disabled=True),
         "Clean Price": st.column_config.NumberColumn("Clean Price", format="%.3f", disabled=True),
+        "Yield on Clean": st.column_config.TextColumn("Yield on Clean", disabled=True),
+        "Next Payout": st.column_config.TextColumn("Next Payout", disabled=True),
     },
-    use_container_width=True, hide_index=True, key="main_editor"
+    use_container_width=True,
+    hide_index=True,
+    key="main_editor"
 )
 
+# Sync edits back to state
 if not edited_df.equals(display_df[column_order]):
-    # Sync edits back (keeping all columns)
-    updated_full_df = edited_df.copy()
-    # If other hidden columns existed, merge them back here
-    st.session_state.df = updated_full_df
+    st.session_state.df = edited_df
     st.rerun()
