@@ -23,7 +23,7 @@ with col_input:
     sofr_dec = sofr_val / 100
 with col_btn:
     st.write(" ") # Alignment
-    refresh = st.button("Refresh Live Prices", use_container_width=True)
+    refresh = st.button("Refresh", use_container_width=True)
 
 # 3. Data Fetching
 @st.cache_data(ttl=300)
@@ -31,21 +31,20 @@ def fetch_live_data():
     data = []
     for ticker in TICKERS:
         t = yf.Ticker(ticker)
-        # Reliable Price Pull
         hist = t.history(period="1d")
         price = hist['Close'].iloc[-1] if not hist.empty else 25.00
         
         divs = t.dividends
         if not divs.empty:
             last_ex = divs.index[-1].to_pydatetime().date()
-            next_ex = (divs.index[-1] + timedelta(days=91)).date() # Estimated 3-month cycle
+            next_ex = (divs.index[-1] + timedelta(days=91)).date()
         else:
             last_ex = date(2025, 10, 31)
             next_ex = date(2026, 1, 30)
         
         data.append({
             "Ticker": ticker,
-            "Margin": f"{META[ticker]['margin']*100:.3f}%",
+            "Margin": f"{META[ticker]['margin']*100:.2f}%",
             "Last Ex-Date": last_ex,
             "Market Price": round(float(price), 2),
             "Accrued Interest": 0.0,
@@ -55,7 +54,7 @@ def fetch_live_data():
             "Next Payout": "",
             "Current Coupon": "",
             "Projected Coupon": "",
-            "Prev Coupon": f"${META[ticker]['prev_coupon']:.4f}"
+            "Prev Coupon": f"${META[ticker]['prev_coupon']:.2f}"
         })
     return pd.DataFrame(data)
 
@@ -67,27 +66,24 @@ def calculate_metrics(df, sofr):
         m = META[ticker]
         price = float(row['Market Price'])
         
-        # Rate Logic
         current_rate = m['declared'] if m['declared'] else (sofr + m['margin'] + ISDA_SPREAD)
         projected_rate = sofr + m['margin'] + ISDA_SPREAD
         
-        # Days Elapsed
         last_ex = row['Last Ex-Date']
         last_ex_dt = datetime.combine(last_ex, datetime.min.time())
         days_elapsed = (datetime.now() - last_ex_dt).days
         
-        # Financial Math
         accrued = (25.0 * current_rate) * (days_elapsed / 360)
         clean_price = price - accrued
         annual_payout = 25.0 * current_rate
         yoc = annual_payout / clean_price if clean_price > 0 else 0
         
-        calc_df.at[i, 'Current Coupon'] = f"{current_rate*100:.4f}%"
-        calc_df.at[i, 'Projected Coupon'] = f"{projected_rate*100:.4f}%"
-        calc_df.at[i, 'Accrued Interest'] = round(accrued, 4)
-        calc_df.at[i, 'Clean Price'] = round(clean_price, 3)
-        calc_df.at[i, 'Yield on Clean'] = f"{yoc*100:.3f}%"
-        calc_df.at[i, 'Next Payout'] = f"${(annual_payout / 4):.4f}"
+        calc_df.at[i, 'Current Coupon'] = f"{current_rate*100:.2f}%"
+        calc_df.at[i, 'Projected Coupon'] = f"{projected_rate*100:.2f}%"
+        calc_df.at[i, 'Accrued Interest'] = round(accrued, 2)
+        calc_df.at[i, 'Clean Price'] = round(clean_price, 2)
+        calc_df.at[i, 'Yield on Clean'] = f"{yoc*100:.2f}%"
+        calc_df.at[i, 'Next Payout'] = f"${(annual_payout / 4):.2f}"
         
     return calc_df
 
@@ -99,85 +95,45 @@ if refresh:
 if 'df' not in st.session_state:
     st.session_state.df = fetch_live_data()
 
-# 5. Render Final Table
+# 5. Render Main Table
 display_df = calculate_metrics(st.session_state.df, sofr_dec)
-
-# Full 12-Column Specification
-column_order = [
-    "Ticker", "Margin", "Last Ex-Date", "Market Price", "Accrued Interest", 
-    "Clean Price", "Yield on Clean", "Next Ex-Date", "Next Payout", 
-    "Current Coupon", "Projected Coupon", "Prev Coupon"
-]
+column_order = ["Ticker", "Margin", "Last Ex-Date", "Market Price", "Accrued Interest", "Clean Price", "Yield on Clean", "Next Ex-Date", "Next Payout", "Current Coupon", "Projected Coupon", "Prev Coupon"]
 
 edited_df = st.data_editor(
     display_df[column_order],
     column_config={
-        "Ticker": st.column_config.TextColumn("Ticker", disabled=True),
-        "Last Ex-Date": st.column_config.DateColumn("Last Ex-Date", format="YYYY-MM-DD"),
-        "Next Ex-Date": st.column_config.DateColumn("Next Ex-Date", format="YYYY-MM-DD"),
-        "Market Price": st.column_config.NumberColumn("Market Price", format="$%.2f"),
-        "Accrued Interest": st.column_config.NumberColumn("Accrued Interest", format="%.4f", disabled=True),
-        "Clean Price": st.column_config.NumberColumn("Clean Price", format="%.3f", disabled=True),
-        "Yield on Clean": st.column_config.TextColumn("Yield on Clean", disabled=True),
-        "Next Payout": st.column_config.TextColumn("Next Payout", disabled=True),
+        "Market Price": st.column_config.NumberColumn(format="$%.2f"),
+        "Accrued Interest": st.column_config.NumberColumn(format="$%.2f"),
+        "Clean Price": st.column_config.NumberColumn(format="$%.2f"),
     },
-    use_container_width=True,
-    hide_index=True,
-    key="main_editor"
+    use_container_width=True, hide_index=True, key="main_editor"
 )
 
-# Sync edits back to state
-if not edited_df.equals(display_df[column_order]):
-    st.session_state.df = edited_df
-    st.rerun()
-
-# --- SENSITIVITY TABLE SECTION (DOWNWARD SHIFTS) ---
+# 6. Sensitivity Table (Downwards)
 st.divider()
-st.subheader("📉 Yield Sensitivity: Rate Cut Scenarios (-0.25% to -1.50%)")
-st.write("This table shows the **Yield on Clean Price** if SOFR drops from your current input.")
+st.subheader("📉 Yield Sensitivity: Rate Cut Scenarios")
 
-# Define the negative shifts only
 shifts = [0.0, -0.0025, -0.0050, -0.0075, -0.0100, -0.0125, -0.0150]
-shift_labels = [
-    "Current SOFR", 
-    "SOFR -0.25%", 
-    "SOFR -0.50%", 
-    "SOFR -0.75%", 
-    "SOFR -1.00%", 
-    "SOFR -1.25%", 
-    "SOFR -1.50%"
-]
+shift_labels = ["Current SOFR", "SOFR -0.25%", "SOFR -0.50%", "SOFR -0.75%", "SOFR -1.00%", "SOFR -1.25%", "SOFR -1.50%"]
 
 sensitivity_data = []
-
-for i, row in st.session_state.df.iterrows():
+for i, row in edited_df.iterrows():
     ticker = row['Ticker']
     m = META[ticker]
-    
-    # Extract the Clean Price from the display calculation
-    clean_p = display_df.loc[display_df['Ticker'] == ticker, 'Clean Price'].values[0]
-    
+    clean_p = float(row['Clean Price'])
     ticker_yields = {"Ticker": ticker}
     
     for shift, label in zip(shifts, shift_labels):
         scenario_sofr = sofr_dec + shift
-        # Formula: Scenario SOFR + Margin + ISDA Spread
         scenario_coupon = scenario_sofr + m['margin'] + ISDA_SPREAD
-        
-        # Yield: (Par * Scenario Coupon) / Clean Price
-        if clean_p > 0:
-            s_yield = (25.0 * scenario_coupon) / clean_p
-            ticker_yields[label] = f"{s_yield*100:.3f}%"
-        else:
-            ticker_yields[label] = "N/A"
+        s_yield = (25.0 * scenario_coupon) / clean_p if clean_p > 0 else 0
+        ticker_yields[label] = f"{s_yield*100:.2f}%"
             
     sensitivity_data.append(ticker_yields)
 
-sens_df = pd.DataFrame(sensitivity_data)
+st.dataframe(pd.DataFrame(sensitivity_data), use_container_width=True, hide_index=True)
 
-# Render the table
-st.dataframe(
-    sens_df,
-    use_container_width=True,
-    hide_index=True
-)
+# Sync edits
+if not edited_df.equals(display_df[column_order]):
+    st.session_state.df = edited_df
+    st.rerun()
