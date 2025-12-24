@@ -1,7 +1,7 @@
 import streamlit as st
 import yfinance as yf
 import pandas as pd
-from datetime import datetime
+from datetime import datetime, date
 
 # 1. Setup & Fixed Metadata
 TICKERS = ["MFA-PC", "RITM-PA", "RITM-PB"]
@@ -27,65 +27,76 @@ def fetch_live_data():
         # Pull Price and Ex-Date (with fallbacks)
         price = t.fast_info.get('lastPrice', 25.00)
         divs = t.dividends
-        last_ex = divs.index[-1].strftime('%Y-%m-%d') if not divs.empty else "2025-10-31"
+        
+        # KEY FIX: Convert to date object immediately
+        if not divs.empty:
+            last_ex = divs.index[-1].to_pydatetime().date()
+        else:
+            last_ex = date(2025, 10, 31)
         
         data.append({
             "Ticker": ticker,
             "Margin": f"{META[ticker]['margin']*100:.3f}%",
-            "Last Ex-Date": last_ex,
+            "Last Ex-Date": last_ex, # Now a date object
             "Market Price": round(price, 2),
-            "Accrued Interest": 0.0, # Calculated below
-            "Clean Price": 0.0,      # Calculated below
-            "Yield on Clean": "",    # Calculated below
+            "Accrued Interest": 0.0,
+            "Clean Price": 0.0,
+            "Yield on Clean": "",
             "Next Ex-Date": "TBD",
-            "Next Payout": 0.0,
-            "Current Coupon": 0.0,
+            "Next Payout": "",
+            "Current Coupon": "",
             "Projected Coupon": f"{(META[ticker]['margin'] + sofr_dec)*100:.3f}%",
             "Prev Coupon": f"${META[ticker]['prev_coupon']:.4f}"
         })
     return pd.DataFrame(data)
 
-# 4. Calculation Engine (Runs on every edit)
+# 4. Calculation Engine
 def calculate_metrics(df, sofr):
-    for i, row in df.iterrows():
+    # We work on a copy to avoid SettingWithCopyWarnings
+    calc_df = df.copy()
+    for i, row in calc_df.iterrows():
         ticker = row['Ticker']
         margin = META[ticker]['margin']
         price = float(row['Market Price'])
         
-        # Date Logic (Actual/360)
-        last_ex = datetime.strptime(str(row['Last Ex-Date']), '%Y-%m-%d')
-        days_elapsed = (datetime.now() - last_ex).days
+        # Logic for Accrual (Actual/360)
+        last_ex = row['Last Ex-Date']
+        # Convert to datetime for math if it's just a date object
+        last_ex_dt = datetime.combine(last_ex, datetime.min.time())
+        days_elapsed = (datetime.now() - last_ex_dt).days
         
-        # Coupon Logic
         current_rate = margin + sofr
-        df.at[i, 'Current Coupon'] = f"{current_rate*100:.3f}%"
+        calc_df.at[i, 'Current Coupon'] = f"{current_rate*100:.3f}%"
         
-        # Accrued & Clean Price
         accrued = (current_rate * 25) * (days_elapsed / 360)
         clean_price = price - accrued
         yoc = (current_rate * 25) / clean_price if clean_price > 0 else 0
         
-        df.at[i, 'Accrued Interest'] = round(accrued, 4)
-        df.at[i, 'Clean Price'] = round(clean_price, 2)
-        df.at[i, 'Yield on Clean'] = f"{yoc*100:.2f}%"
-        df.at[i, 'Next Payout'] = f"${(current_rate * 25 / 4):.4f}"
+        calc_df.at[i, 'Accrued Interest'] = round(accrued, 4)
+        calc_df.at[i, 'Clean Price'] = round(clean_price, 2)
+        calc_df.at[i, 'Yield on Clean'] = f"{yoc*100:.2f}%"
+        calc_df.at[i, 'Next Payout'] = f"${(current_rate * 25 / 4):.4f}"
         
-    return df
+    return calc_df
 
 # Initialize session state
 if 'df' not in st.session_state:
     st.session_state.df = fetch_live_data()
 
 st.title("🚢 Preferred Stock Tracker")
-st.write("Edit **Last Ex-Date** or **Market Price** cells below to correct any data pull errors.")
 
 # 5. The Editable Table
+# We calculate metrics FIRST so the table shows live data on load
+display_df = calculate_metrics(st.session_state.df, sofr_dec)
+
 edited_df = st.data_editor(
-    st.session_state.df,
+    display_df,
     column_config={
-        "Last Ex-Date": st.column_config.DateColumn("Last Ex-Date", format="YYYY-MM-DD"),
+        "Ticker": st.column_config.TextColumn("Ticker", disabled=True),
+        "Last Ex-Date": st.column_config.DateColumn("Last Ex-Date", format="YYYY-MM-DD", required=True),
         "Market Price": st.column_config.NumberColumn("Market Price", format="$%.2f"),
         "Accrued Interest": st.column_config.NumberColumn("Accrued Interest", disabled=True),
+        "Clean Price": st.column_config.NumberColumn("Clean Price", disabled=True),
         "Yield on Clean": st.column_config.TextColumn("Yield on Clean", disabled=True),
     },
     use_container_width=True,
@@ -93,13 +104,12 @@ edited_df = st.data_editor(
     key="main_editor"
 )
 
-# 6. Final Calculations based on (potentially edited) data
-final_df = calculate_metrics(edited_df, sofr_dec)
+# 6. Update logic: If user edits, update the base session state
+if not edited_df.equals(display_df):
+    st.session_state.df = edited_df
+    st.rerun()
 
-# Update state so edits persist
-st.session_state.df = final_df
-
-if st.button("Reset to Live Data"):
+if st.sidebar.button("Reset to Live Data"):
     st.cache_data.clear()
-    st.session_state.df = fetch_live_data()
+    del st.session_state.df
     st.rerun()
